@@ -104,7 +104,7 @@ class EmitAssemblyHelper {
   int tcpDaemonConnectionEstablish(std::string ip, int portNum);
   void tcpDaemonConnectionDestroy(int fd);
   void tcpDaemonWrite(int sockfd, std::string buf);
-  void tcpDaemonRead(int sockfd, std::string &buf);
+  void tcpDaemonRead(int sockfd, char *buf, int buf_size);
   void InsertPredictedPasses(legacy::FunctionPassManager &FPM, Function &F);
   void insertPassHelper(std::vector<unsigned int> &input_set,
           legacy::FunctionPassManager &FPM);
@@ -878,9 +878,9 @@ void EmitAssemblyHelper::tcpDaemonWrite(int sockfd, std::string buf) {
   }
 }
 
-void EmitAssemblyHelper::tcpDaemonRead(int sockfd, std::string &buf) {
+void EmitAssemblyHelper::tcpDaemonRead(int sockfd, char *buf, int buf_size) {
   int n = 0;
-  n = read(sockfd, &buf[0], buf.capacity());
+  n = read(sockfd, buf, buf_size);
   if (n < 0) {
     errs() << "ERROR reading from socket\n";
   }
@@ -899,15 +899,16 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   int tcpFD = -1;
   tcpFD = tcpDaemonConnectionEstablish("127.0.0.1", 8888);
   std::string buf;
-  buf.reserve(1024);
+  buf.reserve(255);
   std::ostringstream stringStream;
   stringStream << F.getName().str();
   buf = std::string("Cheer up! for function: ") + stringStream.str() + std::string("\n");
-  errs() << "Clang tcp WRITE:" << buf << "\n";
+  errs() << "Clang tcp WRITE:" << buf;
   tcpDaemonWrite(tcpFD, buf); // Must end with newline
-  buf.clear();
-  tcpDaemonRead(tcpFD, buf);
-  errs() << "Clang tcp READ:" << buf << "\n";
+  char buffer[256];
+  bzero(buffer,256);
+  tcpDaemonRead(tcpFD, buffer, sizeof(buffer));
+  errs() << "Clang tcp READ:" << buffer << "\n";
   tcpDaemonConnectionDestroy(tcpFD);
   errs() << "Destroy TCP connection\n";
 
