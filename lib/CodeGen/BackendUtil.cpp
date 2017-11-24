@@ -64,6 +64,14 @@
 #include <algorithm>
 #include <random>
 #include <chrono>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <string>
+#include <sstream>
+
 using namespace clang;
 using namespace llvm;
 
@@ -92,6 +100,11 @@ class EmitAssemblyHelper {
   }
 
   void CreatePasses(legacy::PassManager &MPM, legacy::FunctionPassManager &FPM);
+  //Daemon Pass Prediction
+  int tcpDaemonConnectionEstablish(std::string ip, int portNum);
+  void tcpDaemonConnectionDestroy(int fd);
+  void tcpDaemonWrite(int sockfd, std::string buf);
+  void tcpDaemonRead(int sockfd, std::string &buf);
   void InsertPredictedPasses(legacy::FunctionPassManager &FPM, Function &F);
   void insertPassHelper(std::vector<unsigned int> &input_set,
           legacy::FunctionPassManager &FPM);
@@ -823,6 +836,56 @@ void EmitAssemblyHelper::insertPassHelper(
   }
 }
 
+// return socket fd
+int EmitAssemblyHelper::tcpDaemonConnectionEstablish(std::string ip, int portNum) {
+  int sockfd = 0;
+  struct hostent *server;
+  struct sockaddr_in serv_addr;
+
+  server = gethostbyname(ip.c_str());
+  if (server == NULL) {
+    errs() << "ERROR, no such host\n";
+    exit(0);
+  }
+
+  sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sockfd < 0) {
+    errs() << "ERROR opening socket\n";
+  }
+
+  bzero((char *) &serv_addr, sizeof(serv_addr));
+  serv_addr.sin_family = AF_INET;
+
+  bcopy((char *)server->h_addr,
+        (char *)&serv_addr.sin_addr.s_addr,
+         server->h_length);
+  serv_addr.sin_port = htons(portNum);
+  if (connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr)) < 0) {
+    errs() << "ERROR connecting\n";
+  }
+  return sockfd;
+}
+
+void EmitAssemblyHelper::tcpDaemonConnectionDestroy(int fd) {
+  close(fd);
+}
+
+void EmitAssemblyHelper::tcpDaemonWrite(int sockfd, std::string buf) {
+  int n = 0;
+  n = write(sockfd, buf.c_str(), buf.size());
+  if (n < 0) {
+    errs() << "ERROR writing to socket\n";
+  }
+}
+
+void EmitAssemblyHelper::tcpDaemonRead(int sockfd, std::string &buf) {
+  int n = 0;
+  n = read(sockfd, &buf[0], buf.capacity());
+  if (n < 0) {
+    errs() << "ERROR reading from socket\n";
+  }
+}
+
 // Mimic from EmitAssemblyHelper::CreatePasses
 void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
         Function &F) {
@@ -832,6 +895,22 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
       createTLII(TargetTriple, CodeGenOpts));
   FPM.add(new TargetLibraryInfoWrapperPass(*TLII));
   // TODO: Remove random prediction and get predcited passes
+  // TODO:Daemon random prediction
+  int tcpFD = -1;
+  tcpFD = tcpDaemonConnectionEstablish("127.0.0.1", 8888);
+  std::string buf;
+  buf.reserve(1024);
+  std::ostringstream stringStream;
+  stringStream << F.getName().str();
+  buf = std::string("Cheer up! for function: ") + stringStream.str() + std::string("\n");
+  errs() << "Clang tcp WRITE:" << buf << "\n";
+  tcpDaemonWrite(tcpFD, buf); // Must end with newline
+  buf.clear();
+  tcpDaemonRead(tcpFD, buf);
+  errs() << "Clang tcp READ:" << buf << "\n";
+  tcpDaemonConnectionDestroy(tcpFD);
+  errs() << "Destroy TCP connection\n";
+
   // Random Prediction
   struct timespec time;
   clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time);
