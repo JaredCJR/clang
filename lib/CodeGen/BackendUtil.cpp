@@ -105,7 +105,7 @@ class EmitAssemblyHelper {
   void tcpDaemonConnectionDestroy(int fd);
   void tcpDaemonWrite(int sockfd, std::string buf);
   void tcpDaemonRead(int sockfd, char *buf, int buf_size);
-  void InsertPredictedPasses(legacy::FunctionPassManager &FPM, Function &F);
+  void InsertPredictedPasses(legacy::FunctionPassManager &FPM, Function &F, int tcpFD);
   void insertPassHelper(std::vector<unsigned int> &input_set,
           legacy::FunctionPassManager &FPM);
 
@@ -888,55 +888,43 @@ void EmitAssemblyHelper::tcpDaemonRead(int sockfd, char *buf, int buf_size) {
 
 // Mimic from EmitAssemblyHelper::CreatePasses
 void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
-        Function &F) {
+        Function &F, int tcpFD) {
   // Add LibraryInfo.
   llvm::Triple TargetTriple(TheModule->getTargetTriple());
   std::unique_ptr<TargetLibraryInfoImpl> TLII(
       createTLII(TargetTriple, CodeGenOpts));
   FPM.add(new TargetLibraryInfoWrapperPass(*TLII));
-  // TODO: Remove random prediction and get predcited passes
+
   // TODO:Daemon random prediction
-  int tcpFD = -1;
+  // Create TCP connection
   tcpFD = tcpDaemonConnectionEstablish("127.0.0.1", 8888);
+  // Write to daemon
   std::string buf;
-  buf.reserve(255);
+  buf.reserve(1024);
   std::ostringstream stringStream;
   stringStream << F.getName().str();
-  buf = std::string("Cheer up! for function: ") + stringStream.str() + std::string("\n");
+  buf = stringStream.str() + std::string("\n");
   errs() << "Clang tcp WRITE:" << buf;
   tcpDaemonWrite(tcpFD, buf); // Must end with newline
-  char buffer[256];
-  bzero(buffer,256);
-  tcpDaemonRead(tcpFD, buffer, sizeof(buffer));
-  errs() << "Clang tcp READ:" << buffer << "\n";
+  // Read from daemon
+  char DaemonRetBuffer[1024];
+  bzero(DaemonRetBuffer,sizeof(DaemonRetBuffer));
+  tcpDaemonRead(tcpFD, DaemonRetBuffer, sizeof(DaemonRetBuffer));
+  errs() << "Clang tcp READ:" << DaemonRetBuffer << "\n";
+  // Destroy TCP connection
   tcpDaemonConnectionDestroy(tcpFD);
-  errs() << "Destroy TCP connection\n";
 
-  // Random Prediction
-  struct timespec time;
-  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time);
-  unsigned int nanosecs = time.tv_nsec; // only take nanoseconds part
-  unsigned int seed = nanosecs ^ getpid();
-  unsigned int PassNum = (unsigned int)(((double)rand_r(&seed) /
-          (double)(1.0 + (double)RAND_MAX)) * 34.0);//Total 34 kinds of passes
-  std::vector<unsigned int> ShuffleSet;
-  ShuffleSet.reserve(34);
-  for(unsigned int i = 1; i <= 34; i++) {
-    ShuffleSet.push_back(i);
+  //At least 1 pass and convert into a vector of uint
+  std::vector<unsigned int> PredictedSet;
+  std::string tmp;
+  std::string StrDaemonRetBuffer(DaemonRetBuffer);
+  std::stringstream ss(StrDaemonRetBuffer);
+  while(ss >> tmp) {
+    PredictedSet.push_back(std::stoi(tmp));
   }
-  seed = std::chrono::system_clock::now().time_since_epoch().count() ^ getpid();
-  shuffle(ShuffleSet.begin(), ShuffleSet.end(), std::default_random_engine(seed));
-  //At least 1 pass
-  std::vector<unsigned int> PredictedSet(ShuffleSet.begin(), ShuffleSet.begin() + PassNum + 1);
+
   // Insert Predicted Passes
   insertPassHelper(PredictedSet, FPM);
-  /*
-  errs() << F.getName() << "() use Set:";
-  for(unsigned int i = 0;i < PredictedSet.size(); i++) {
-    errs() << PredictedSet[i] << " ";
-  }
-  errs() << "\n";
-  */
 }
 
 void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
@@ -1026,10 +1014,11 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   {
     PrettyStackTraceString CrashInfo("Predicted optimization");
 
+    int tcpFD = -1;
     for (Function &F : *TheModule) {
       if (!F.isDeclaration()) {
         legacy::FunctionPassManager PredictFPM(TheModule);
-        InsertPredictedPasses(PredictFPM, F);
+        InsertPredictedPasses(PredictFPM, F, tcpFD);
         PredictFPM.doInitialization();
         PredictFPM.run(F);
         PredictFPM.doFinalization();
