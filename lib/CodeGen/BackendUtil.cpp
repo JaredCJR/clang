@@ -71,6 +71,7 @@
 #include <netdb.h>
 #include <string>
 #include <sstream>
+#include <cxxabi.h>
 
 using namespace clang;
 using namespace llvm;
@@ -105,6 +106,7 @@ class EmitAssemblyHelper {
   void tcpDaemonConnectionDestroy(int fd);
   void tcpDaemonWrite(int sockfd, std::string buf);
   void tcpDaemonRead(int sockfd, char *buf, int buf_size);
+  std::string getDemangledFunctionName(Function &F);
   void InsertPredictedPasses(legacy::FunctionPassManager &FPM, Function &F, int tcpFD);
   void insertPassHelper(std::vector<unsigned int> &input_set,
           legacy::FunctionPassManager &FPM);
@@ -886,6 +888,14 @@ void EmitAssemblyHelper::tcpDaemonRead(int sockfd, char *buf, int buf_size) {
   }
 }
 
+std::string EmitAssemblyHelper::getDemangledFunctionName(Function &F) {
+  int status = -99;
+  const char *OrigName = abi::__cxa_demangle(F.getName().str().c_str(), NULL, NULL, &status);
+  if (OrigName == NULL) {
+      OrigName = F.getName().str().c_str();
+  }
+  return std::string(OrigName);
+}
 // Mimic from EmitAssemblyHelper::CreatePasses
 void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
         Function &F, int tcpFD) {
@@ -897,12 +907,12 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
 
   // TODO:Daemon random prediction
   // Create TCP connection
-  tcpFD = tcpDaemonConnectionEstablish("127.0.0.1", 8888);
+  tcpFD = tcpDaemonConnectionEstablish("127.0.0.1", 7521);
   // Write to daemon
   std::string buf;
   buf.reserve(1024);
   std::ostringstream stringStream;
-  stringStream << F.getName().str();
+  stringStream << getDemangledFunctionName(F);
   buf = stringStream.str() + std::string("\n");
   errs() << "Clang tcp WRITE:" << buf;
   tcpDaemonWrite(tcpFD, buf); // Must end with newline
@@ -1018,6 +1028,9 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     for (Function &F : *TheModule) {
       if (!F.isDeclaration()) {
         legacy::FunctionPassManager PredictFPM(TheModule);
+        //try start
+        //F.print(errs()); // this get IR
+        //try end
         InsertPredictedPasses(PredictFPM, F, tcpFD);
         PredictFPM.doInitialization();
         PredictFPM.run(F);
