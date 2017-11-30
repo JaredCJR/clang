@@ -912,15 +912,17 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   std::string buf;
   buf.reserve(1024);
   std::ostringstream stringStream;
-  stringStream << getDemangledFunctionName(F);
-  buf = stringStream.str() + std::string("\n");
-  errs() << "Clang tcp WRITE:" << buf;
+  std::string ModuleName = F.getParent()->getName().str();
+  std::string FunctionName = getDemangledFunctionName(F);
+  buf = std::string("ModuleName=") + ModuleName + " | " + 
+      std::string("FunctionName=") + FunctionName +std::string("\n");
+  errs() << "Clang tcp WRITE: " << buf;
   tcpDaemonWrite(tcpFD, buf); // Must end with newline
   // Read from daemon
   char DaemonRetBuffer[1024];
   bzero(DaemonRetBuffer,sizeof(DaemonRetBuffer));
   tcpDaemonRead(tcpFD, DaemonRetBuffer, sizeof(DaemonRetBuffer));
-  errs() << "Clang tcp READ:" << DaemonRetBuffer << "\n";
+  errs() << "Clang tcp READ: " << DaemonRetBuffer << "\n";
   // Destroy TCP connection
   tcpDaemonConnectionDestroy(tcpFD);
 
