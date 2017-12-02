@@ -832,7 +832,7 @@ void EmitAssemblyHelper::insertPassHelper(
         FPM.add(llvm::createLowerExpectIntrinsicPass());
         break;
       default:
-        errs() << "Thesis: Pass Index:"<< pass << " Insert Failed!";
+        errs() << "Thesis: Pass Index:"<< pass << " Insert Failed!\n";
         break;
     }
   }
@@ -905,24 +905,27 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
       createTLII(TargetTriple, CodeGenOpts));
   FPM.add(new TargetLibraryInfoWrapperPass(*TLII));
 
-  // TODO:Daemon random prediction
   // Create TCP connection
   tcpFD = tcpDaemonConnectionEstablish("127.0.0.1", 7521);
   // Write to daemon
   std::string buf;
   buf.reserve(1024);
   std::ostringstream stringStream;
+  /*
   std::string ModuleName = F.getParent()->getName().str();
   std::string FunctionName = getDemangledFunctionName(F);
   buf = std::string("ModuleName=") + ModuleName + " | " + 
       std::string("FunctionName=") + FunctionName +std::string("\n");
-  errs() << "Clang tcp WRITE: " << buf;
+  */
+  //IMPORTANT: "buf" must end with newline
+  buf = getDemangledFunctionName(F) + std::string("\n");
+  //errs() << "Clang tcp WRITE: " << buf;
   tcpDaemonWrite(tcpFD, buf); // Must end with newline
+
   // Read from daemon
   char DaemonRetBuffer[1024];
   bzero(DaemonRetBuffer,sizeof(DaemonRetBuffer));
   tcpDaemonRead(tcpFD, DaemonRetBuffer, sizeof(DaemonRetBuffer));
-  errs() << "Clang tcp READ: " << DaemonRetBuffer << "\n";
   // Destroy TCP connection
   tcpDaemonConnectionDestroy(tcpFD);
 
@@ -937,6 +940,8 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
 
   // Insert Predicted Passes
   insertPassHelper(PredictedSet, FPM);
+  //Notification for log
+  errs() << "#";
 }
 
 void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
