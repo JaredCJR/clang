@@ -72,6 +72,8 @@
 #include <string>
 #include <sstream>
 #include <cxxabi.h>
+#include "llvm/IRReader/IRReader.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
 using namespace llvm;
@@ -941,7 +943,7 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   // Insert Predicted Passes
   insertPassHelper(PredictedSet, FPM);
   //Notification for log
-  errs() << "#";
+  errs() << "$";
 }
 
 void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
@@ -1027,6 +1029,56 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     PerFunctionPasses.doFinalization();
   }
 
+  // Feature Extraction
+  // Save the original IR for Instrumentation Passes to manipulate.
+  std::error_code ec;
+  StringRef tmpIR = "/tmp/IR";
+  raw_fd_ostream *OrigIRstream;
+  OrigIRstream = new raw_fd_ostream(tmpIR, ec, llvm::sys::fs::OpenFlags::F_RW);
+  *OrigIRstream << *TheModule;
+  OrigIRstream->close();
+  // Read IR into Module
+  LLVMContext IRContext;
+  SMDiagnostic Err;
+  std::unique_ptr<Module> Mod_1 = parseIRFile(tmpIR, Err, IRContext);
+  std::unique_ptr<Module> Mod_2 = parseIRFile(tmpIR, Err, IRContext);
+  // Apply passes
+  legacy::FunctionPassManager FPM_1(Mod_1.get());
+  legacy::FunctionPassManager FPM_2(Mod_2.get());
+  std::vector<unsigned int> vec_1;
+  std::vector<unsigned int> vec_2;
+  for(int i = 1;i <= 34; i++)
+      vec_1.push_back(i);
+  vec_2.push_back(1);
+  insertPassHelper(vec_1, FPM_1);
+  insertPassHelper(vec_2, FPM_2);
+  FPM_1.doInitialization();
+  FPM_2.doInitialization();
+  for (Function &F : *Mod_1) {
+    if (!F.isDeclaration()) {
+      FPM_1.run(F);
+    }
+  }
+  for (Function &F : *Mod_2) {
+    if (!F.isDeclaration()) {
+      FPM_2.run(F);
+    }
+  }
+  FPM_1.doFinalization();
+  FPM_2.doFinalization();
+  // Output two IR for comparision
+  StringRef tmpIR_1 = "/tmp/IR_1";
+  StringRef tmpIR_2 = "/tmp/IR_2";
+  raw_fd_ostream *IRstream_1;
+  raw_fd_ostream *IRstream_2;
+  IRstream_1 = new raw_fd_ostream(tmpIR_1, ec, llvm::sys::fs::OpenFlags::F_RW);
+  IRstream_2 = new raw_fd_ostream(tmpIR_2, ec, llvm::sys::fs::OpenFlags::F_RW);
+  *IRstream_1 << *Mod_1;
+  *IRstream_2 << *Mod_2;
+  IRstream_1->close();
+  IRstream_2->close();
+  
+
   // Insert and exexute predicted passes
   {
     PrettyStackTraceString CrashInfo("Predicted optimization");
@@ -1035,9 +1087,7 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     for (Function &F : *TheModule) {
       if (!F.isDeclaration()) {
         legacy::FunctionPassManager PredictFPM(TheModule);
-        //try start
         //F.print(errs()); // this get IR
-        //try end
         InsertPredictedPasses(PredictFPM, F, tcpFD);
         PredictFPM.doInitialization();
         PredictFPM.run(F);
