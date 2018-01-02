@@ -74,6 +74,7 @@
 #include <cxxabi.h>
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/PassPrediction/PassPrediction-Instrumentation.h"
 
 using namespace clang;
 using namespace llvm;
@@ -1032,11 +1033,13 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   // Feature Extraction
   // Save the original IR for Instrumentation Passes to manipulate.
   std::error_code ec;
+  //FIXME: hash the file name to avoid conflict
   StringRef tmpIR = "/tmp/IR";
   raw_fd_ostream *OrigIRstream;
   OrigIRstream = new raw_fd_ostream(tmpIR, ec, llvm::sys::fs::OpenFlags::F_RW);
   *OrigIRstream << *TheModule;
   OrigIRstream->close();
+  /*
   // Read IR into Module
   LLVMContext IRContext;
   SMDiagnostic Err;
@@ -1077,6 +1080,29 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   *IRstream_2 << *Mod_2;
   IRstream_1->close();
   IRstream_2->close();
+  */
+  PassPrediction::FeatureRecorder &InstrumentRec = PassPrediction::FeatureRecorder::getInstance();
+  InstrumentRec.EnableInstrumentation();
+  //TODO
+  // Read IR into Module
+  LLVMContext IRContext;
+  SMDiagnostic Err;
+  std::unique_ptr<Module> InstrumentationMod = parseIRFile(tmpIR, Err, IRContext);
+  // Apply passes
+  legacy::FunctionPassManager InstrumentationFPM(InstrumentationMod.get());
+  std::vector<unsigned int> vec;
+  for(int i = 1;i <= 34; i++)
+      vec.push_back(i);
+  insertPassHelper(vec, InstrumentationFPM);
+  InstrumentationFPM.doInitialization();
+  for (Function &F : *InstrumentationMod) {
+    if (!F.isDeclaration()) {
+      InstrumentRec.setCurrFuncName(F.getName());
+      InstrumentationFPM.run(F);
+    }
+  }
+  InstrumentationFPM.doFinalization();
+  InstrumentRec.DisableInstrumentation();
   
 
   // Insert and exexute predicted passes
