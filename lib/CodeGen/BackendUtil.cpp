@@ -72,6 +72,8 @@
 #include <string>
 #include <sstream>
 #include <cxxabi.h>
+#include <unistd.h>
+#include <stdio.h>
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/PassPrediction/PassPrediction-Instrumentation.h"
@@ -1019,9 +1021,8 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
 
   // Run passes. For now we do all passes at once, but eventually we
   // would like to have the option of streaming code generation.
-
   {
-    PrettyStackTraceString CrashInfo("Per-function optimization: PassPrediction");
+    PrettyStackTraceString CrashInfo("Per-function optimization: Original Behavior");
 
     PerFunctionPasses.doInitialization();
     for (Function &F : *TheModule)
@@ -1033,77 +1034,44 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   // Feature Extraction
   // Save the original IR for Instrumentation Passes to manipulate.
   std::error_code ec;
-  //FIXME: hash the file name to avoid conflict
-  StringRef tmpIR = "/tmp/IR";
+  std::string pid = std::to_string((int)getpid());
+  // Avoid name conflicting in multi-thread build.
+  std::string tmpIR = std::string("/tmp/IR-") + pid;
   raw_fd_ostream *OrigIRstream;
   OrigIRstream = new raw_fd_ostream(tmpIR, ec, llvm::sys::fs::OpenFlags::F_RW);
   *OrigIRstream << *TheModule;
   OrigIRstream->close();
-  /*
-  // Read IR into Module
-  LLVMContext IRContext;
-  SMDiagnostic Err;
-  std::unique_ptr<Module> Mod_1 = parseIRFile(tmpIR, Err, IRContext);
-  std::unique_ptr<Module> Mod_2 = parseIRFile(tmpIR, Err, IRContext);
-  // Apply passes
-  legacy::FunctionPassManager FPM_1(Mod_1.get());
-  legacy::FunctionPassManager FPM_2(Mod_2.get());
-  std::vector<unsigned int> vec_1;
-  std::vector<unsigned int> vec_2;
-  for(int i = 1;i <= 34; i++)
-      vec_1.push_back(i);
-  vec_2.push_back(1);
-  insertPassHelper(vec_1, FPM_1);
-  insertPassHelper(vec_2, FPM_2);
-  FPM_1.doInitialization();
-  FPM_2.doInitialization();
-  for (Function &F : *Mod_1) {
-    if (!F.isDeclaration()) {
-      FPM_1.run(F);
-    }
-  }
-  for (Function &F : *Mod_2) {
-    if (!F.isDeclaration()) {
-      FPM_2.run(F);
-    }
-  }
-  FPM_1.doFinalization();
-  FPM_2.doFinalization();
-  // Output two IR for comparision
-  StringRef tmpIR_1 = "/tmp/IR_1";
-  StringRef tmpIR_2 = "/tmp/IR_2";
-  raw_fd_ostream *IRstream_1;
-  raw_fd_ostream *IRstream_2;
-  IRstream_1 = new raw_fd_ostream(tmpIR_1, ec, llvm::sys::fs::OpenFlags::F_RW);
-  IRstream_2 = new raw_fd_ostream(tmpIR_2, ec, llvm::sys::fs::OpenFlags::F_RW);
-  *IRstream_1 << *Mod_1;
-  *IRstream_2 << *Mod_2;
-  IRstream_1->close();
-  IRstream_2->close();
-  */
+  // Prepare to run instrumented passes
   PassPrediction::FeatureRecorder &InstrumentRec = PassPrediction::FeatureRecorder::getInstance();
+  // Enable instrumentation
   InstrumentRec.EnableInstrumentation();
-  //TODO
-  // Read IR into Module
-  LLVMContext IRContext;
-  SMDiagnostic Err;
-  std::unique_ptr<Module> InstrumentationMod = parseIRFile(tmpIR, Err, IRContext);
-  // Apply passes
-  legacy::FunctionPassManager InstrumentationFPM(InstrumentationMod.get());
-  std::vector<unsigned int> vec;
-  for(int i = 1;i <= 34; i++)
-      vec.push_back(i);
-  insertPassHelper(vec, InstrumentationFPM);
-  InstrumentationFPM.doInitialization();
-  for (Function &F : *InstrumentationMod) {
-    if (!F.isDeclaration()) {
-      InstrumentRec.setCurrFuncName(F.getName());
-      InstrumentationFPM.run(F);
+  std::vector<unsigned int> PassVec;
+  for (int i = 1;i <= 34; i++) {
+    // Read original IR
+    LLVMContext IRContext;
+    SMDiagnostic Err;
+    std::unique_ptr<Module> InstrumentationMod = parseIRFile(tmpIR, Err, IRContext);
+    // Prepare apply passes
+    legacy::FunctionPassManager InstrumentationFPM(InstrumentationMod.get());
+    PassVec.clear();
+    PassVec.push_back(i);
+    // Apply passes
+    insertPassHelper(PassVec, InstrumentationFPM);
+    InstrumentationFPM.doInitialization();
+    for (Function &F : *InstrumentationMod) {
+      if (!F.isDeclaration()) {
+        InstrumentRec.setCurrFuncName(F.getName());
+        InstrumentationFPM.run(F);
+      }
     }
+    InstrumentationFPM.doFinalization();
   }
-  InstrumentationFPM.doFinalization();
+  // Disable instrumentation
   InstrumentRec.DisableInstrumentation();
-  
+  // Remove the IR to keep disk space
+  if (remove(tmpIR.data()) != 0)
+    errs() << "Error deleting Original IR:" << tmpIR << "\n";
+  // Instrumetation Process is done.
 
   // Insert and exexute predicted passes
   {
