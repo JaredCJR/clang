@@ -1037,8 +1037,7 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   std::string pid = std::to_string((int)getpid());
   // Avoid name conflicting in multi-thread build.
   std::string tmpIR = std::string("/tmp/IR-") + pid;
-  raw_fd_ostream *OrigIRstream;
-  OrigIRstream = new raw_fd_ostream(tmpIR, ec, llvm::sys::fs::OpenFlags::F_RW);
+  raw_fd_ostream *OrigIRstream = new raw_fd_ostream(tmpIR, ec, llvm::sys::fs::OpenFlags::F_RW);
   *OrigIRstream << *TheModule;
   OrigIRstream->close();
   // Prepare to run instrumented passes
@@ -1072,6 +1071,7 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   if (remove(tmpIR.data()) != 0)
     errs() << "Error deleting Original IR:" << tmpIR << "\n";
   // Instrumetation Process is done.
+  //InstrumentRec.printFeatures();
 
   // Insert and exexute predicted passes
   {
