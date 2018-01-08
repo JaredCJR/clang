@@ -915,7 +915,7 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   // whether this function comes from std namespace?
   // Yes: use the default 4 passes.
   // No: call daemon
-  if (demangledFuncName.find(std::string("std::")) != 0) {
+  if (PassPrediction::isWorthToExtract(demangledFuncName)) {
     // Create TCP connection
     int tcpFD = tcpDaemonConnectionEstablish(tcpIP, tcpPort);
     // Write to daemon
