@@ -909,9 +909,20 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   std::unique_ptr<TargetLibraryInfoImpl> TLII(
       createTLII(TargetTriple, CodeGenOpts));
   FPM.add(new TargetLibraryInfoWrapperPass(*TLII));
-
+  //TODO and FIXME: is the function is from std namespace, just apply the default 4 passes.
+  // createCFGSimplificationPass(), createSROAPass(), 
+  // createEarlyCSEPass(), createLowerExpectIntrinsicPass()
+  unsigned tcpPort = 7521;
+  int workerID = -1;
+#if defined(DAEMON_WORKER_ID)
+  workerID = DAEMON_WORKER_ID;
+  //TODO: assign port number for different worker
+  errs() << "workerID=" << workerID << "\n";
+#else
+  #error "workerID should be defined in cmake build command for training framework."
+#endif
   // Create TCP connection
-  tcpFD = tcpDaemonConnectionEstablish("127.0.0.1", 7521);
+  tcpFD = tcpDaemonConnectionEstablish("127.0.0.1", tcpPort);
   // Write to daemon
   std::string buf;
   buf.reserve(1024);
@@ -921,6 +932,10 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   std::string FunctionName = getDemangledFunctionName(F);
   buf = std::string("ModuleName=") + ModuleName + " | " + 
       std::string("FunctionName=") + FunctionName +std::string("\n");
+  */
+  /*
+  std::string FunctionName = getDemangledFunctionName(F);
+  errs() << FunctionName << "\n";
   */
   //IMPORTANT: "buf" must end with newline
   buf = getDemangledFunctionName(F) + std::string("\n");
