@@ -71,6 +71,7 @@
 #include <netdb.h>
 #include <string>
 #include <sstream>
+#include <fstream>
 #include <cxxabi.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -112,7 +113,7 @@ class EmitAssemblyHelper {
   void tcpDaemonWrite(int sockfd, std::string buf);
   void tcpDaemonRead(int sockfd, char *buf, int buf_size);
   std::string getDemangledFunctionName(Function &F);
-  void InsertPredictedPasses(legacy::FunctionPassManager &FPM, Function &F, int tcpFD);
+  void InsertPredictedPasses(legacy::FunctionPassManager &FPM, Function &F, StringRef tcpIP, unsigned tcpPort);
   void insertPassHelper(std::vector<unsigned int> &input_set,
           legacy::FunctionPassManager &FPM);
 
@@ -903,64 +904,57 @@ std::string EmitAssemblyHelper::getDemangledFunctionName(Function &F) {
 }
 // Mimic from EmitAssemblyHelper::CreatePasses
 void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
-        Function &F, int tcpFD) {
+        Function &F, StringRef tcpIP, unsigned tcpPort) {
   // Add LibraryInfo.
   llvm::Triple TargetTriple(TheModule->getTargetTriple());
   std::unique_ptr<TargetLibraryInfoImpl> TLII(
       createTLII(TargetTriple, CodeGenOpts));
   FPM.add(new TargetLibraryInfoWrapperPass(*TLII));
-  //TODO and FIXME: is the function is from std namespace, just apply the default 4 passes.
-  // createCFGSimplificationPass(), createSROAPass(), 
-  // createEarlyCSEPass(), createLowerExpectIntrinsicPass()
-  unsigned tcpPort = 7521;
-  int workerID = -1;
-#if defined(DAEMON_WORKER_ID)
-  workerID = DAEMON_WORKER_ID;
-  //TODO: assign port number for different worker
-  errs() << "workerID=" << workerID << "\n";
-#else
-  #error "workerID should be defined in cmake build command for training framework."
-#endif
-  // Create TCP connection
-  tcpFD = tcpDaemonConnectionEstablish("127.0.0.1", tcpPort);
-  // Write to daemon
-  std::string buf;
-  buf.reserve(1024);
-  std::ostringstream stringStream;
-  /*
-  std::string ModuleName = F.getParent()->getName().str();
-  std::string FunctionName = getDemangledFunctionName(F);
-  buf = std::string("ModuleName=") + ModuleName + " | " + 
-      std::string("FunctionName=") + FunctionName +std::string("\n");
-  */
-  /*
-  std::string FunctionName = getDemangledFunctionName(F);
-  errs() << FunctionName << "\n";
-  */
-  //IMPORTANT: "buf" must end with newline
-  buf = getDemangledFunctionName(F) + std::string("\n");
-  //errs() << "Clang tcp WRITE: " << buf;
-  tcpDaemonWrite(tcpFD, buf); // Must end with newline
+  std::string mangledFuncName = F.getName().str();
+  std::string demangledFuncName = PassPrediction::getDemangledFunctionName(mangledFuncName);
+  // whether this function comes from std namespace?
+  // Yes: use the default 4 passes.
+  // No: call daemon
+  if (demangledFuncName.find(std::string("std::")) != 0) {
+    // Create TCP connection
+    int tcpFD = tcpDaemonConnectionEstablish(tcpIP, tcpPort);
+    // Write to daemon
+    std::string buf;
+    buf.reserve(1024);
+    std::ostringstream stringStream;
+    // get features
+    PassPrediction::FeatureRecorder &InstrumentRec = 
+      PassPrediction::FeatureRecorder::getInstance();
+    std::string features = InstrumentRec.getFeatureAsString(mangledFuncName);
+    //IMPORTANT: "buf" must end with newline
+    buf = demangledFuncName + std::string(" @ ") + features + std::string("\n");
+    //errs() << "Clang tcp WRITE: " << buf;
+    tcpDaemonWrite(tcpFD, buf); // Must end with newline
 
-  // Read from daemon
-  char DaemonRetBuffer[1024];
-  bzero(DaemonRetBuffer,sizeof(DaemonRetBuffer));
-  tcpDaemonRead(tcpFD, DaemonRetBuffer, sizeof(DaemonRetBuffer));
-  // Destroy TCP connection
-  tcpDaemonConnectionDestroy(tcpFD);
+    // Read from daemon
+    char DaemonRetBuffer[1024];
+    bzero(DaemonRetBuffer,sizeof(DaemonRetBuffer));
+    tcpDaemonRead(tcpFD, DaemonRetBuffer, sizeof(DaemonRetBuffer));
+    // Destroy TCP connection
+    tcpDaemonConnectionDestroy(tcpFD);
 
-  //At least 1 pass and convert into a vector of uint
-  std::vector<unsigned int> PredictedSet;
-  std::string tmp;
-  std::string StrDaemonRetBuffer(DaemonRetBuffer);
-  std::stringstream ss(StrDaemonRetBuffer);
-  while(ss >> tmp) {
-    PredictedSet.push_back(std::stoi(tmp));
+    //At least 1 pass and convert into a vector of uint
+    std::vector<unsigned int> PredictedSet;
+    std::string tmp;
+    std::string StrDaemonRetBuffer(DaemonRetBuffer);
+    std::stringstream ss(StrDaemonRetBuffer);
+    while(ss >> tmp) {
+      PredictedSet.push_back(std::stoi(tmp));
+    }
+    // Insert Predicted Passes
+    insertPassHelper(PredictedSet, FPM);
+  } else { // this function comes from std namespace, and uses the default 4 passes.
+    FPM.add(createCFGSimplificationPass());
+    FPM.add(createSROAPass());
+    FPM.add(createEarlyCSEPass());
+    FPM.add(createLowerExpectIntrinsicPass());
   }
-
-  // Insert Predicted Passes
-  insertPassHelper(PredictedSet, FPM);
-  //Notification for log
+  //Notification for using PassPrediction
   errs() << "$";
 }
 
@@ -1087,17 +1081,21 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     errs() << "Error deleting Original IR:" << tmpIR << "\n";
   // Instrumetation Process is done.
   //InstrumentRec.printFeatures();
+  // Read tcpIP and tcpPort
+  std::unordered_map<std::string, std::pair<std::string, std::string> > WorkerDestMap; // <IP, Port>
+  PassPrediction::BuildWorkerDestMap(WorkerDestMap);
 
   // Insert and exexute predicted passes
   {
     PrettyStackTraceString CrashInfo("Predicted optimization");
 
-    int tcpFD = -1;
     for (Function &F : *TheModule) {
       if (!F.isDeclaration()) {
         legacy::FunctionPassManager PredictFPM(TheModule);
         //F.print(errs()); // this get IR
-        InsertPredictedPasses(PredictFPM, F, tcpFD);
+        InsertPredictedPasses(PredictFPM, F, 
+            WorkerDestMap[std::to_string(InstrumentRec.getWorkerID())].first, 
+            std::stoul(WorkerDestMap[std::to_string(InstrumentRec.getWorkerID())].second, nullptr, 10));
         PredictFPM.doInitialization();
         PredictFPM.run(F);
         PredictFPM.doFinalization();
