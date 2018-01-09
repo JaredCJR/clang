@@ -912,15 +912,14 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   FPM.add(new TargetLibraryInfoWrapperPass(*TLII));
   std::string mangledFuncName = F.getName().str();
   std::string demangledFuncName = PassPrediction::getDemangledFunctionName(mangledFuncName);
-  // whether this function comes from std namespace?
-  // Yes: use the default 4 passes.
-  // No: call daemon
+  // whether this function not comes from std namespace or other buildin function?
+  // Yes: call daemon
+  // No: use the default 4 passes.
   if (PassPrediction::isWorthToExtract(demangledFuncName)) {
     // Create TCP connection
     int tcpFD = tcpDaemonConnectionEstablish(tcpIP, tcpPort);
     // Write to daemon
     std::string buf;
-    buf.reserve(1024);
     std::ostringstream stringStream;
     // get features
     PassPrediction::FeatureRecorder &InstrumentRec = 
