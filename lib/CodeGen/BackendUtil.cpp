@@ -75,6 +75,9 @@
 #include <cxxabi.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/PassPrediction/PassPrediction-Instrumentation.h"
@@ -927,7 +930,7 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
       PassPrediction::FeatureRecorder::getInstance();
     // Note: if the InsertPredictedPasses executed before 
     // the feature extraction procedure(ex. training), you will get empty string
-    std::string features = InstrumentRec.getFeatureAsString(mangledFuncName);
+    std::string features = InstrumentRec.getFeatureAsString(mangledFuncName, std::string(", "));
     // IMPORTANT: "buf" must end with newline
     buf = demangledFuncName + std::string(" @ ") + features + std::string("\n");
     tcpDaemonWrite(tcpFD, buf); // Must end with newline
@@ -1082,7 +1085,7 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     LLVMContext IRContext;
     SMDiagnostic Err;
     std::unique_ptr<Module> InstrumentationMod = parseIRFile(tmpIR, Err, IRContext);
-    // Prepare apply passes
+    // Prepare to apply passes
     legacy::FunctionPassManager InstrumentationFPM(InstrumentationMod.get());
     PassVec.clear();
     PassVec.push_back(i);
@@ -1102,8 +1105,19 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   // Remove the IR to keep disk space
   if (remove(tmpIR.data()) != 0)
     errs() << "Error deleting Original IR:" << tmpIR << "\n";
+  // Write features to file
+  std::string featureLoc = std::string("/tmp/PredictionDaemon/worker-") +
+    std::to_string(InstrumentRec.getWorkerID());
+  struct stat buf;
+  stat(featureLoc.c_str(), &buf);
+  bool isdir = S_ISDIR(buf.st_mode);
+  if (!isdir) {
+    std::string cmd = std::string("mkdir -p ") + featureLoc;
+    system(cmd.c_str());
+  }
+  featureLoc = featureLoc + std::string("/features");
+  InstrumentRec.writeAllFeatures(featureLoc);
   // Instrumetation Process is done.
-  //InstrumentRec.printFeatures();
 
   {
     PrettyStackTraceString CrashInfo("Per-module optimization passes");
