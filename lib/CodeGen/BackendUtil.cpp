@@ -839,6 +839,7 @@ void EmitAssemblyHelper::insertPassHelper(
         break;
       default:
         errs() << "Thesis: Pass Index:"<< pass << " Insert Failed!\n";
+        exit(EXIT_FAILURE);
         break;
     }
   }
@@ -922,12 +923,13 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
     std::string buf;
     std::ostringstream stringStream;
     // get features
-    PassPrediction::FeatureRecorder &InstrumentRec = 
+    PassPrediction::FeatureRecorder &InstrumentRec =
       PassPrediction::FeatureRecorder::getInstance();
+    // Note: if the InsertPredictedPasses executed before 
+    // the feature extraction procedure(ex. training), you will get empty string
     std::string features = InstrumentRec.getFeatureAsString(mangledFuncName);
-    //IMPORTANT: "buf" must end with newline
+    // IMPORTANT: "buf" must end with newline
     buf = demangledFuncName + std::string(" @ ") + features + std::string("\n");
-    //errs() << "Clang tcp WRITE: " << buf;
     tcpDaemonWrite(tcpFD, buf); // Must end with newline
 
     // Read from daemon
@@ -937,7 +939,7 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
     // Destroy TCP connection
     tcpDaemonConnectionDestroy(tcpFD);
 
-    //At least 1 pass and convert into a vector of uint
+    // Convert into a vector of uint, it may be empty
     std::vector<unsigned int> PredictedSet;
     std::string tmp;
     std::string StrDaemonRetBuffer(DaemonRetBuffer);
@@ -1039,6 +1041,30 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     PerFunctionPasses.doFinalization();
   }
 
+  // Prepare to run instrumented passes
+  PassPrediction::FeatureRecorder &InstrumentRec = PassPrediction::FeatureRecorder::getInstance();
+  // Disable instrumentation
+  InstrumentRec.DisableInstrumentation();
+  // Read tcpIP and tcpPort
+  std::unordered_map<std::string, std::pair<std::string, std::string> > WorkerDestMap; // <IP, Port>
+  PassPrediction::BuildWorkerDestMap(WorkerDestMap);
+
+  // Insert and exexute predicted passes
+  {
+    PrettyStackTraceString CrashInfo("Predicted optimization");
+
+    for (Function &F : *TheModule) {
+      if (!F.isDeclaration()) {
+        legacy::FunctionPassManager PredictFPM(TheModule);
+        InsertPredictedPasses(PredictFPM, F,
+            WorkerDestMap[std::to_string(InstrumentRec.getWorkerID())].first,
+            std::stoul(WorkerDestMap[std::to_string(InstrumentRec.getWorkerID())].second, nullptr, 10));
+        PredictFPM.doInitialization();
+        PredictFPM.run(F);
+        PredictFPM.doFinalization();
+      }
+    }
+  }
   // Feature Extraction
   // Save the original IR for Instrumentation Passes to manipulate.
   std::error_code ec;
@@ -1048,8 +1074,6 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   raw_fd_ostream *OrigIRstream = new raw_fd_ostream(tmpIR, ec, llvm::sys::fs::OpenFlags::F_RW);
   *OrigIRstream << *TheModule;
   OrigIRstream->close();
-  // Prepare to run instrumented passes
-  PassPrediction::FeatureRecorder &InstrumentRec = PassPrediction::FeatureRecorder::getInstance();
   // Enable instrumentation
   InstrumentRec.EnableInstrumentation();
   std::vector<unsigned int> PassVec;
@@ -1080,27 +1104,6 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     errs() << "Error deleting Original IR:" << tmpIR << "\n";
   // Instrumetation Process is done.
   //InstrumentRec.printFeatures();
-  // Read tcpIP and tcpPort
-  std::unordered_map<std::string, std::pair<std::string, std::string> > WorkerDestMap; // <IP, Port>
-  PassPrediction::BuildWorkerDestMap(WorkerDestMap);
-
-  // Insert and exexute predicted passes
-  {
-    PrettyStackTraceString CrashInfo("Predicted optimization");
-
-    for (Function &F : *TheModule) {
-      if (!F.isDeclaration()) {
-        legacy::FunctionPassManager PredictFPM(TheModule);
-        //F.print(errs()); // this get IR
-        InsertPredictedPasses(PredictFPM, F, 
-            WorkerDestMap[std::to_string(InstrumentRec.getWorkerID())].first, 
-            std::stoul(WorkerDestMap[std::to_string(InstrumentRec.getWorkerID())].second, nullptr, 10));
-        PredictFPM.doInitialization();
-        PredictFPM.run(F);
-        PredictFPM.doFinalization();
-      }
-    }
-  }
 
   {
     PrettyStackTraceString CrashInfo("Per-module optimization passes");
