@@ -64,7 +64,6 @@
 #include <algorithm>
 #include <random>
 #include <chrono>
-#include <stdlib.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
