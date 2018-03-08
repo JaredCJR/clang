@@ -80,6 +80,7 @@
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/PassPrediction/PassPrediction-Instrumentation.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 using namespace clang;
 using namespace llvm;
@@ -109,13 +110,16 @@ class EmitAssemblyHelper {
   }
 
   void CreatePasses(legacy::PassManager &MPM, legacy::FunctionPassManager &FPM);
-  //Daemon Pass Prediction
+  // Daemon Pass Prediction
   int tcpDaemonConnectionEstablish(std::string ip, int portNum);
   void tcpDaemonConnectionDestroy(int fd);
   void tcpDaemonWrite(int sockfd, std::string buf);
   void tcpDaemonRead(int sockfd, char *buf, int buf_size);
   std::string getDemangledFunctionName(Function &F);
+  bool isWorthToPredict(Function &F, std::unordered_map<std::string, bool> &Map);
+  void createWorthlessFunctionMap(Module *Mod, std::unordered_map<std::string, bool> &Map);
   void InsertPredictedPasses(legacy::FunctionPassManager &FPM, Function &F, StringRef tcpIP, unsigned tcpPort);
+  void InsertDefaultPasses(legacy::FunctionPassManager &FPM);
   void insertPassHelper(std::vector<unsigned int> &input_set,
           legacy::FunctionPassManager &FPM);
 
@@ -905,6 +909,28 @@ std::string EmitAssemblyHelper::getDemangledFunctionName(Function &F) {
   }
   return std::string(OrigName);
 }
+
+void EmitAssemblyHelper::createWorthlessFunctionMap(Module *Mod,
+    std::unordered_map<std::string, bool> &Map) {
+  for (Function &F : *Mod) {
+    std::string mangledFuncName = F.getName().str();
+    std::string demangledFuncName = PassPrediction::getDemangledFunctionName(mangledFuncName);
+    if(!PassPrediction::isWorthToExtract(demangledFuncName)) {
+      // if it is not worth to extract features, it must be put into the worthless map.
+      Map[mangledFuncName] = true;
+    }
+  }
+}
+
+bool EmitAssemblyHelper::isWorthToPredict(Function &F, std::unordered_map<std::string, bool> &Map) {
+  std::string mangledFuncName = F.getName().str();
+  if(Map.find(mangledFuncName) == Map.end()) {
+    // if the function is not in the worthless map, it is worth to predict.
+    return true;
+  }
+  return false;
+}
+
 // Mimic from EmitAssemblyHelper::CreatePasses
 void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
         Function &F, StringRef tcpIP, unsigned tcpPort) {
@@ -915,50 +941,52 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   FPM.add(new TargetLibraryInfoWrapperPass(*TLII));
   std::string mangledFuncName = F.getName().str();
   std::string demangledFuncName = PassPrediction::getDemangledFunctionName(mangledFuncName);
-  // whether this function not comes from std namespace or other buildin function?
-  // Yes: call daemon
-  // No: use the default 4 passes.
-  if (PassPrediction::isWorthToExtract(demangledFuncName)) {
-    // Create TCP connection
-    int tcpFD = tcpDaemonConnectionEstablish(tcpIP, tcpPort);
-    // Write to daemon
-    std::string buf;
-    std::ostringstream stringStream;
-    // get features
-    PassPrediction::FeatureRecorder &InstrumentRec =
-      PassPrediction::FeatureRecorder::getInstance();
-    // Note: if the InsertPredictedPasses executed before 
-    // the feature extraction procedure(ex. training), you will get empty string
-    std::string features = InstrumentRec.getFeatureAsString(mangledFuncName, std::string(", "));
-    // IMPORTANT: "buf" must end with newline
-    buf = demangledFuncName + std::string(" @ ") + features + std::string("\n");
-    tcpDaemonWrite(tcpFD, buf); // Must end with newline
+  // Create TCP connection
+  int tcpFD = tcpDaemonConnectionEstablish(tcpIP, tcpPort);
+  // Write to daemon
+  std::string buf;
+  std::ostringstream stringStream;
+  // get features
+  PassPrediction::FeatureRecorder &InstrumentRec =
+    PassPrediction::FeatureRecorder::getInstance();
+  // Note: if the InsertPredictedPasses executed before
+  // the feature extraction procedure(ex. training), you will get empty string
+  std::string features = InstrumentRec.getFeatureAsString(mangledFuncName, std::string(", "));
+  // IMPORTANT: "buf" must end with newline
+  buf = demangledFuncName + std::string(" @ ") + features + std::string("\n");
+  tcpDaemonWrite(tcpFD, buf); // Must end with newline
 
-    // Read from daemon
-    char DaemonRetBuffer[1024];
-    bzero(DaemonRetBuffer,sizeof(DaemonRetBuffer));
-    tcpDaemonRead(tcpFD, DaemonRetBuffer, sizeof(DaemonRetBuffer));
-    // Destroy TCP connection
-    tcpDaemonConnectionDestroy(tcpFD);
+  // Read from daemon
+  char DaemonRetBuffer[1024];
+  bzero(DaemonRetBuffer,sizeof(DaemonRetBuffer));
+  tcpDaemonRead(tcpFD, DaemonRetBuffer, sizeof(DaemonRetBuffer));
+  // Destroy TCP connection
+  tcpDaemonConnectionDestroy(tcpFD);
 
-    // Convert into a vector of uint, it may be empty
-    std::vector<unsigned int> PredictedSet;
-    std::string tmp;
-    std::string StrDaemonRetBuffer(DaemonRetBuffer);
-    std::stringstream ss(StrDaemonRetBuffer);
-    while(ss >> tmp) {
-      PredictedSet.push_back(std::stoi(tmp));
-    }
-    // Insert Predicted Passes
-    insertPassHelper(PredictedSet, FPM);
-  } else { // this function comes from std namespace, and uses the default 4 passes.
-    FPM.add(createCFGSimplificationPass());
-    FPM.add(createSROAPass());
-    FPM.add(createEarlyCSEPass());
-    FPM.add(createLowerExpectIntrinsicPass());
+  //errs() << "Get " << DaemonRetBuffer << "\n";
+  // Convert into a vector of uint, it may be empty
+  std::vector<unsigned int> PredictedSet;
+  std::string tmp;
+  std::string StrDaemonRetBuffer(DaemonRetBuffer);
+  std::stringstream ss(StrDaemonRetBuffer);
+  while(ss >> tmp) {
+    PredictedSet.push_back(std::stoi(tmp));
   }
-  //Notification for using PassPrediction
-  errs() << "$";
+  // Insert Predicted Passes
+  insertPassHelper(PredictedSet, FPM);
+  // Notification for using PassPrediction
+  errs() << "^";
+}
+void EmitAssemblyHelper::InsertDefaultPasses(legacy::FunctionPassManager &FPM) {
+  // Add LibraryInfo.
+  llvm::Triple TargetTriple(TheModule->getTargetTriple());
+  std::unique_ptr<TargetLibraryInfoImpl> TLII(
+      createTLII(TargetTriple, CodeGenOpts));
+  FPM.add(new TargetLibraryInfoWrapperPass(*TLII));
+  FPM.add(createCFGSimplificationPass());
+  FPM.add(createSROAPass());
+  FPM.add(createEarlyCSEPass());
+  FPM.add(createLowerExpectIntrinsicPass());
 }
 
 void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
@@ -1043,80 +1071,63 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     PerFunctionPasses.doFinalization();
   }
 
+  PrettyStackTraceString CrashInfo("Predicted optimization");
   // Prepare to run instrumented passes
   PassPrediction::FeatureRecorder &InstrumentRec = PassPrediction::FeatureRecorder::getInstance();
-  // Disable instrumentation
-  InstrumentRec.DisableInstrumentation();
   // Read tcpIP and tcpPort
   std::unordered_map<std::string, std::pair<std::string, std::string> > WorkerDestMap; // <IP, Port>
   PassPrediction::BuildWorkerDestMap(WorkerDestMap);
-
-  // Insert and exexute predicted passes
-  {
-    PrettyStackTraceString CrashInfo("Predicted optimization");
-
+  // record the functions that should use the default 4 passes.
+  std::unordered_map<std::string, bool> WorthlessFunctionMap;
+  createWorthlessFunctionMap(TheModule, WorthlessFunctionMap);
+  std::string WorkerID = std::to_string(InstrumentRec.getWorkerID());
+  std::vector<unsigned int> PassVec;
+  for(int i = 0; i < 9; i++) { // 9 is the experienced number of passes
+    // Enable instrumentation
+    InstrumentRec.EnableInstrumentation();
+    for (int j = 1;j <= 34; j++) {
+      // Read IR which is not corrupted by the instrumentation pass.
+      std::unique_ptr<Module> InstrumentationMod = CloneModule(TheModule);
+      // Prepare to apply pass for instrumentation
+      legacy::FunctionPassManager InstrumentationFPM(InstrumentationMod.get());
+      PassVec.clear();
+      PassVec.push_back(j);
+      // Apply passes
+      insertPassHelper(PassVec, InstrumentationFPM);
+      InstrumentationFPM.doInitialization();
+      for (Function &F : *InstrumentationMod) {
+        if (!F.isDeclaration() && isWorthToPredict(F, WorthlessFunctionMap)) {
+          InstrumentRec.setCurrFuncName(F.getName());
+          InstrumentationFPM.run(F);
+        }
+      }
+      InstrumentationFPM.doFinalization();
+    } // end of instrumentation
+    // Disable instrumentation
+    InstrumentRec.DisableInstrumentation();
     for (Function &F : *TheModule) {
-      if (!F.isDeclaration()) {
+      if (!F.isDeclaration() && isWorthToPredict(F, WorthlessFunctionMap)) {
         legacy::FunctionPassManager PredictFPM(TheModule);
         InsertPredictedPasses(PredictFPM, F,
-            WorkerDestMap[std::to_string(InstrumentRec.getWorkerID())].first,
-            std::stoul(WorkerDestMap[std::to_string(InstrumentRec.getWorkerID())].second, nullptr, 10));
+            WorkerDestMap[WorkerID].first,
+            std::stoul(WorkerDestMap[WorkerID].second, nullptr, 10));
         PredictFPM.doInitialization();
         PredictFPM.run(F);
         PredictFPM.doFinalization();
       }
     }
   }
-  // Feature Extraction
-  // Save the original IR for Instrumentation Passes to manipulate.
-  std::error_code ec;
-  std::string pid = std::to_string((int)getpid());
-  // Avoid name conflicting in multi-thread build.
-  std::string tmpIR = std::string("/tmp/IR-") + pid;
-  raw_fd_ostream *OrigIRstream = new raw_fd_ostream(tmpIR, ec, llvm::sys::fs::OpenFlags::F_RW);
-  *OrigIRstream << *TheModule;
-  OrigIRstream->close();
-  // Enable instrumentation
-  InstrumentRec.EnableInstrumentation();
-  std::vector<unsigned int> PassVec;
-  for (int i = 1;i <= 34; i++) {
-    // Read original IR
-    LLVMContext IRContext;
-    SMDiagnostic Err;
-    std::unique_ptr<Module> InstrumentationMod = parseIRFile(tmpIR, Err, IRContext);
-    // Prepare to apply passes
-    legacy::FunctionPassManager InstrumentationFPM(InstrumentationMod.get());
-    PassVec.clear();
-    PassVec.push_back(i);
-    // Apply passes
-    insertPassHelper(PassVec, InstrumentationFPM);
-    InstrumentationFPM.doInitialization();
-    for (Function &F : *InstrumentationMod) {
-      if (!F.isDeclaration()) {
-        InstrumentRec.setCurrFuncName(F.getName());
-        InstrumentationFPM.run(F);
-      }
+  // for those which only need to apply default 4 passes.
+  legacy::FunctionPassManager DefaultFPM(TheModule);
+  InsertDefaultPasses(DefaultFPM);
+  DefaultFPM.doInitialization();
+  for (Function &F : *TheModule) {
+    if (!F.isDeclaration() && !isWorthToPredict(F, WorthlessFunctionMap)) {
+      DefaultFPM.run(F);
     }
-    InstrumentationFPM.doFinalization();
   }
-  // Disable instrumentation
-  InstrumentRec.DisableInstrumentation();
-  // Remove the IR to keep disk space
-  if (remove(tmpIR.data()) != 0)
-    errs() << "Error deleting Original IR:" << tmpIR << "\n";
-  // Write features to file
-  std::string featureLoc = std::string("/tmp/PredictionDaemon/worker-") +
-    std::to_string(InstrumentRec.getWorkerID());
-  struct stat buf;
-  stat(featureLoc.c_str(), &buf);
-  bool isdir = S_ISDIR(buf.st_mode);
-  if (!isdir) {
-    std::string cmd = std::string("mkdir -p ") + featureLoc;
-    system(cmd.c_str());
-  }
-  featureLoc = featureLoc + std::string("/features");
-  InstrumentRec.writeAllFeatures(featureLoc);
-  // Instrumetation Process is done.
+  DefaultFPM.doFinalization();
+  // end of pass prediction
 
   {
     PrettyStackTraceString CrashInfo("Per-module optimization passes");
