@@ -975,7 +975,7 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   // Insert Predicted Passes
   insertPassHelper(PredictedSet, FPM);
   // Notification for using PassPrediction
-  errs() << "^";
+  //errs() << "^";
 }
 void EmitAssemblyHelper::InsertDefaultPasses(legacy::FunctionPassManager &FPM) {
   // Add LibraryInfo.
