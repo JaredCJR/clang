@@ -73,10 +73,11 @@
 #include <fstream>
 #include <cxxabi.h>
 #include <unistd.h>
-#include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <sys/file.h>
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/PassPrediction/PassPrediction-Instrumentation.h"
@@ -118,7 +119,8 @@ class EmitAssemblyHelper {
   std::string getDemangledFunctionName(Function &F);
   bool isWorthToPredict(Function &F, std::unordered_map<std::string, bool> &Map);
   void createWorthlessFunctionMap(Module *Mod, std::unordered_map<std::string, bool> &Map);
-  void InsertPredictedPasses(legacy::FunctionPassManager &FPM, Function &F, StringRef tcpIP, unsigned tcpPort);
+  void InsertPredictedPasses(legacy::FunctionPassManager &FPM, Function &F, StringRef tcpIP,
+      unsigned tcpPort, std::unordered_map<std::string, std::vector<unsigned int>> &DebugPassRec);
   void InsertDefaultPasses(legacy::FunctionPassManager &FPM);
   void insertPassHelper(std::vector<unsigned int> &input_set,
           legacy::FunctionPassManager &FPM);
@@ -933,7 +935,8 @@ bool EmitAssemblyHelper::isWorthToPredict(Function &F, std::unordered_map<std::s
 
 // Mimic from EmitAssemblyHelper::CreatePasses
 void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
-        Function &F, StringRef tcpIP, unsigned tcpPort) {
+        Function &F, StringRef tcpIP, unsigned tcpPort,
+        std::unordered_map<std::string, std::vector<unsigned int>> &DebugPassRec) {
   // Add LibraryInfo.
   llvm::Triple TargetTriple(TheModule->getTargetTriple());
   std::unique_ptr<TargetLibraryInfoImpl> TLII(
@@ -953,7 +956,7 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   // the feature extraction procedure(ex. training), you will get empty string
   std::string features = InstrumentRec.getFeatureAsString(mangledFuncName, std::string(", "));
   // IMPORTANT: "buf" must end with newline
-  buf = demangledFuncName + std::string(" @ ") + features + std::string("\n");
+  buf = mangledFuncName + std::string(" @ ") + features + std::string("\n");
   tcpDaemonWrite(tcpFD, buf); // Must end with newline
 
   // Read from daemon
@@ -969,14 +972,38 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
   std::string tmp;
   std::string StrDaemonRetBuffer(DaemonRetBuffer);
   std::stringstream ss(StrDaemonRetBuffer);
+  unsigned int pass;
   while(ss >> tmp) {
-    PredictedSet.push_back(std::stoi(tmp));
+    pass = std::stoi(tmp);
+    PredictedSet.push_back(pass);
   }
   // Insert Predicted Passes
   insertPassHelper(PredictedSet, FPM);
   // Notification for using PassPrediction
   //errs() << "^";
+
+  // debugging purpose with tfServer.py for race condition
+  // This mechanism must cooperate with DebugRecord() in tfServer.py
+  /*
+  if(DebugPassRec.find(mangledFuncName) == DebugPassRec.end()) {
+    DebugPassRec[mangledFuncName] = std::vector<unsigned int>();
+  }
+  DebugPassRec[mangledFuncName].push_back(pass);
+  if(DebugPassRec[mangledFuncName].size() == 9) {
+    std::fstream fs;
+    fs.open ("/tmp/PassPrediction-debug-Clang", std::fstream::app);
+    fs << mangledFuncName << ":";
+    for(unsigned int i = 0;i < DebugPassRec[mangledFuncName].size(); i++) {
+      fs << DebugPassRec[mangledFuncName][i] << ",";
+    }
+    fs << "\n";
+    fs.close();
+    DebugPassRec[mangledFuncName].clear();
+    DebugPassRec.erase(mangledFuncName);
+  }
+  */
 }
+
 void EmitAssemblyHelper::InsertDefaultPasses(legacy::FunctionPassManager &FPM) {
   // Add LibraryInfo.
   llvm::Triple TargetTriple(TheModule->getTargetTriple());
@@ -1082,6 +1109,11 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   createWorthlessFunctionMap(TheModule, WorthlessFunctionMap);
   std::string WorkerID = std::to_string(InstrumentRec.getWorkerID());
   std::vector<unsigned int> PassVec;
+  // Normally, TCP port only serve one process once a time.
+  int tcp_lock = open("/tmp/Clang-TcpLock", O_CREAT, S_IWUSR | S_IRUSR);
+  flock(tcp_lock, LOCK_EX);
+  // debug purpose
+  std::unordered_map<std::string, std::vector<unsigned int>> DebugPassRec;
   for(int i = 0; i < 9; i++) { // 9 is the experienced number of passes
     // Enable instrumentation
     InstrumentRec.EnableInstrumentation();
@@ -1110,13 +1142,15 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
         legacy::FunctionPassManager PredictFPM(TheModule);
         InsertPredictedPasses(PredictFPM, F,
             WorkerDestMap[WorkerID].first,
-            std::stoul(WorkerDestMap[WorkerID].second, nullptr, 10));
+            std::stoul(WorkerDestMap[WorkerID].second, nullptr, 10),
+            DebugPassRec);
         PredictFPM.doInitialization();
         PredictFPM.run(F);
         PredictFPM.doFinalization();
       }
     }
   }
+  flock(tcp_lock, LOCK_UN);
   // for those which only need to apply default 4 passes.
   legacy::FunctionPassManager DefaultFPM(TheModule);
   InsertDefaultPasses(DefaultFPM);
