@@ -984,7 +984,6 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
 
   // debugging purpose with tfServer.py for race condition
   // This mechanism must cooperate with DebugRecord() in tfServer.py
-  /*
   if(DebugPassRec.find(mangledFuncName) == DebugPassRec.end()) {
     DebugPassRec[mangledFuncName] = std::vector<unsigned int>();
   }
@@ -1001,7 +1000,6 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
     DebugPassRec[mangledFuncName].clear();
     DebugPassRec.erase(mangledFuncName);
   }
-  */
 }
 
 void EmitAssemblyHelper::InsertDefaultPasses(legacy::FunctionPassManager &FPM) {
@@ -1109,10 +1107,10 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   createWorthlessFunctionMap(TheModule, WorthlessFunctionMap);
   std::string WorkerID = std::to_string(InstrumentRec.getWorkerID());
   std::vector<unsigned int> PassVec;
-  // Normally, TCP port only serve one process once a time.
-  int tcp_lock = open((std::string("/tmp/Clang-TcpLock-Worker") + WorkerID).c_str(),
+  // The runtime(PassPrediction::FeatureRecorder, which is singleton) face the race condtion.
+  int runtime_lock = open((std::string("/tmp/Clang-RuntimeLock-Worker") + WorkerID).c_str(),
       O_CREAT, S_IWUSR | S_IRUSR);
-  flock(tcp_lock, LOCK_EX);
+  flock(runtime_lock, LOCK_EX);
   // debug purpose
   std::unordered_map<std::string, std::vector<unsigned int>> DebugPassRec;
   for(int i = 0; i < 9; i++) { // 9 is the experienced number of passes
@@ -1151,7 +1149,6 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
       }
     }
   }
-  flock(tcp_lock, LOCK_UN);
   // for those which only need to apply default 4 passes.
   legacy::FunctionPassManager DefaultFPM(TheModule);
   InsertDefaultPasses(DefaultFPM);
@@ -1162,6 +1159,7 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     }
   }
   DefaultFPM.doFinalization();
+  flock(runtime_lock, LOCK_UN);
   // end of pass prediction
 
   {
