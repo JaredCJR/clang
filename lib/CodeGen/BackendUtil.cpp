@@ -1097,6 +1097,10 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   }
 
   PrettyStackTraceString CrashInfo("Predicted optimization");
+  // The runtime(PassPrediction::FeatureRecorder, which is singleton) face the race condtion.
+  int runtime_lock = open((std::string("/tmp/Clang-RuntimeLock-Worker")+std::to_string(DAEMON_WORKER_ID)).c_str(),
+      O_CREAT, S_IWUSR | S_IRUSR);
+  flock(runtime_lock, LOCK_EX);
   // Prepare to run instrumented passes
   PassPrediction::FeatureRecorder &InstrumentRec = PassPrediction::FeatureRecorder::getInstance();
   // Read tcpIP and tcpPort
@@ -1107,10 +1111,6 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   createWorthlessFunctionMap(TheModule, WorthlessFunctionMap);
   std::string WorkerID = std::to_string(InstrumentRec.getWorkerID());
   std::vector<unsigned int> PassVec;
-  // The runtime(PassPrediction::FeatureRecorder, which is singleton) face the race condtion.
-  int runtime_lock = open((std::string("/tmp/Clang-RuntimeLock-Worker") + WorkerID).c_str(),
-      O_CREAT, S_IWUSR | S_IRUSR);
-  flock(runtime_lock, LOCK_EX);
   // debug purpose
   std::unordered_map<std::string, std::vector<unsigned int>> DebugPassRec;
   for(int i = 0; i < 9; i++) { // 9 is the experienced number of passes
