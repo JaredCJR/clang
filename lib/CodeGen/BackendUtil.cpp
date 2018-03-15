@@ -1110,7 +1110,8 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   std::string WorkerID = std::to_string(InstrumentRec.getWorkerID());
   std::vector<unsigned int> PassVec;
   // Normally, TCP port only serve one process once a time.
-  int tcp_lock = open("/tmp/Clang-TcpLock", O_CREAT, S_IWUSR | S_IRUSR);
+  int tcp_lock = open((std::string("/tmp/Clang-TcpLock-Worker") + WorkerID).c_str(),
+      O_CREAT, S_IWUSR | S_IRUSR);
   flock(tcp_lock, LOCK_EX);
   // debug purpose
   std::unordered_map<std::string, std::vector<unsigned int>> DebugPassRec;
