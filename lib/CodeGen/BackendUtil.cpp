@@ -984,6 +984,7 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
 
   // debugging purpose with tfServer.py for race condition
   // This mechanism must cooperate with DebugRecord() in tfServer.py
+  /*
   if(DebugPassRec.find(mangledFuncName) == DebugPassRec.end()) {
     DebugPassRec[mangledFuncName] = std::vector<unsigned int>();
   }
@@ -1000,6 +1001,7 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
     DebugPassRec[mangledFuncName].clear();
     DebugPassRec.erase(mangledFuncName);
   }
+  */
 }
 
 void EmitAssemblyHelper::InsertDefaultPasses(legacy::FunctionPassManager &FPM) {
