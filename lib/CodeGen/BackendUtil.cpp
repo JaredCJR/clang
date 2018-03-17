@@ -1119,7 +1119,7 @@ void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
     FPM.add(createLowerExpectIntrinsicPass());
   }
   //Notification for using PassPrediction
-  errs() << "$";
+  //errs() << "$";
 }
 
 void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
