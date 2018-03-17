@@ -112,6 +112,7 @@ class EmitAssemblyHelper {
 
   void CreatePasses(legacy::PassManager &MPM, legacy::FunctionPassManager &FPM);
   // Daemon Pass Prediction
+  void CreateFPMAnalysisInfo(legacy::FunctionPassManager &FPM);
   int tcpDaemonConnectionEstablish(std::string ip, int portNum);
   void tcpDaemonConnectionDestroy(int fd);
   void tcpDaemonWrite(int sockfd, std::string buf);
@@ -667,6 +668,173 @@ void EmitAssemblyHelper::CreatePasses(legacy::PassManager &MPM,
   PMBuilder.populateModulePassManager(MPM);
 }
 
+// Mimic behavior from CreatePasses()
+void EmitAssemblyHelper::CreateFPMAnalysisInfo(legacy::FunctionPassManager &FPM) {
+  // Handle disabling of all LLVM passes, where we want to preserve the
+  // internal module before any optimization.
+  if (CodeGenOpts.DisableLLVMPasses)
+    return;
+
+  // Figure out TargetLibraryInfo.  This needs to be added to MPM and FPM
+  // manually (and not via PMBuilder), since some passes (eg. InstrProfiling)
+  // are inserted before PMBuilder ones - they'd get the default-constructed
+  // TLI with an unknown target otherwise.
+  Triple TargetTriple(TheModule->getTargetTriple());
+  std::unique_ptr<TargetLibraryInfoImpl> TLII(
+      createTLII(TargetTriple, CodeGenOpts));
+
+  PassManagerBuilderWrapper PMBuilder(TargetTriple, CodeGenOpts, LangOpts);
+
+  // At O0 and O1 we only run the always inliner which is more efficient. At
+  // higher optimization levels we run the normal inliner.
+  if (CodeGenOpts.OptimizationLevel <= 1) {
+    bool InsertLifetimeIntrinsics = (CodeGenOpts.OptimizationLevel != 0 &&
+                                     !CodeGenOpts.DisableLifetimeMarkers);
+    PMBuilder.Inliner = createAlwaysInlinerLegacyPass(InsertLifetimeIntrinsics);
+  } else {
+    // We do not want to inline hot callsites for SamplePGO module-summary build
+    // because profile annotation will happen again in ThinLTO backend, and we
+    // want the IR of the hot path to match the profile.
+    PMBuilder.Inliner = createFunctionInliningPass(
+        CodeGenOpts.OptimizationLevel, CodeGenOpts.OptimizeSize,
+        (!CodeGenOpts.SampleProfileFile.empty() &&
+         CodeGenOpts.EmitSummaryIndex));
+  }
+
+  PMBuilder.OptLevel = CodeGenOpts.OptimizationLevel;
+  PMBuilder.SizeLevel = CodeGenOpts.OptimizeSize;
+  PMBuilder.SLPVectorize = CodeGenOpts.VectorizeSLP;
+  PMBuilder.LoopVectorize = CodeGenOpts.VectorizeLoop;
+
+  PMBuilder.DisableUnrollLoops = !CodeGenOpts.UnrollLoops;
+  PMBuilder.MergeFunctions = CodeGenOpts.MergeFunctions;
+  PMBuilder.PrepareForThinLTO = CodeGenOpts.EmitSummaryIndex;
+  PMBuilder.PrepareForLTO = CodeGenOpts.PrepareForLTO;
+  PMBuilder.RerollLoops = CodeGenOpts.RerollLoops;
+
+  if (TM)
+    TM->adjustPassManager(PMBuilder);
+
+  if (CodeGenOpts.DebugInfoForProfiling ||
+      !CodeGenOpts.SampleProfileFile.empty())
+    PMBuilder.addExtension(PassManagerBuilder::EP_EarlyAsPossible,
+                           addAddDiscriminatorsPass);
+
+  // In ObjC ARC mode, add the main ARC optimization passes.
+  if (LangOpts.ObjCAutoRefCount) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_EarlyAsPossible,
+                           addObjCARCExpandPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly,
+                           addObjCARCAPElimPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_ScalarOptimizerLate,
+                           addObjCARCOptPass);
+  }
+
+  if (LangOpts.Sanitize.has(SanitizerKind::LocalBounds)) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_ScalarOptimizerLate,
+                           addBoundsCheckingPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addBoundsCheckingPass);
+  }
+
+  if (CodeGenOpts.SanitizeCoverageType ||
+      CodeGenOpts.SanitizeCoverageIndirectCalls ||
+      CodeGenOpts.SanitizeCoverageTraceCmp) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addSanitizerCoveragePass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addSanitizerCoveragePass);
+  }
+
+  if (LangOpts.Sanitize.has(SanitizerKind::Address)) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addAddressSanitizerPasses);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addAddressSanitizerPasses);
+  }
+
+  if (LangOpts.Sanitize.has(SanitizerKind::KernelAddress)) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addKernelAddressSanitizerPasses);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addKernelAddressSanitizerPasses);
+  }
+
+
+  if (LangOpts.Sanitize.has(SanitizerKind::Memory)) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addMemorySanitizerPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addMemorySanitizerPass);
+  }
+
+  if (LangOpts.Sanitize.has(SanitizerKind::Thread)) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addThreadSanitizerPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addThreadSanitizerPass);
+  }
+
+  if (LangOpts.Sanitize.has(SanitizerKind::DataFlow)) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addDataFlowSanitizerPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addDataFlowSanitizerPass);
+  }
+
+  if (LangOpts.CoroutinesTS)
+    addCoroutinePassesToExtensionPoints(PMBuilder);
+
+  if (LangOpts.Sanitize.hasOneOf(SanitizerKind::Efficiency)) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addEfficiencySanitizerPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addEfficiencySanitizerPass);
+  }
+
+  // Set up the per-function pass manager.
+  FPM.add(new TargetLibraryInfoWrapperPass(*TLII));
+  if (CodeGenOpts.VerifyModule)
+    FPM.add(createVerifierPass());
+
+
+  if (!CodeGenOpts.DisableGCov &&
+      (CodeGenOpts.EmitGcovArcs || CodeGenOpts.EmitGcovNotes)) {
+    // Not using 'GCOVOptions::getDefault' allows us to avoid exiting if
+    // LLVM's -default-gcov-version flag is set to something invalid.
+    GCOVOptions Options;
+    Options.EmitNotes = CodeGenOpts.EmitGcovNotes;
+    Options.EmitData = CodeGenOpts.EmitGcovArcs;
+    memcpy(Options.Version, CodeGenOpts.CoverageVersion, 4);
+    Options.UseCfgChecksum = CodeGenOpts.CoverageExtraChecksum;
+    Options.NoRedZone = CodeGenOpts.DisableRedZone;
+    Options.FunctionNamesInData =
+        !CodeGenOpts.CoverageNoFunctionNamesInData;
+    Options.ExitBlockBeforeBody = CodeGenOpts.CoverageExitBlockBeforeBody;
+  }
+
+  if (CodeGenOpts.hasProfileClangInstr()) {
+    InstrProfOptions Options;
+    Options.NoRedZone = CodeGenOpts.DisableRedZone;
+    Options.InstrProfileOutput = CodeGenOpts.InstrProfileOutput;
+  }
+  if (CodeGenOpts.hasProfileIRInstr()) {
+    PMBuilder.EnablePGOInstrGen = true;
+    if (!CodeGenOpts.InstrProfileOutput.empty())
+      PMBuilder.PGOInstrGen = CodeGenOpts.InstrProfileOutput;
+    else
+      PMBuilder.PGOInstrGen = DefaultProfileGenName;
+  }
+  if (CodeGenOpts.hasProfileIRUse())
+    PMBuilder.PGOInstrUse = CodeGenOpts.ProfileInstrumentUsePath;
+
+  if (!CodeGenOpts.SampleProfileFile.empty())
+    PMBuilder.PGOSampleUse = CodeGenOpts.SampleProfileFile;
+
+  PMBuilder.populateFunctionPassManager(FPM);
+}
+
+
 static void setCommandLineOpts(const CodeGenOptions &CodeGenOpts) {
   SmallVector<const char *, 16> BackendArgs;
   BackendArgs.push_back("clang"); // Fake program name.
@@ -937,11 +1105,6 @@ bool EmitAssemblyHelper::isWorthToPredict(Function &F, std::unordered_map<std::s
 void EmitAssemblyHelper::InsertPredictedPasses(legacy::FunctionPassManager &FPM,
         Function &F, StringRef tcpIP, unsigned tcpPort,
         std::unordered_map<std::string, std::vector<unsigned int>> &DebugPassRec) {
-  // Add LibraryInfo.
-  llvm::Triple TargetTriple(TheModule->getTargetTriple());
-  std::unique_ptr<TargetLibraryInfoImpl> TLII(
-      createTLII(TargetTriple, CodeGenOpts));
-  FPM.add(new TargetLibraryInfoWrapperPass(*TLII));
   std::string mangledFuncName = F.getName().str();
   std::string demangledFuncName = PassPrediction::getDemangledFunctionName(mangledFuncName);
   // Create TCP connection
@@ -1123,6 +1286,7 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
       std::unique_ptr<Module> InstrumentationMod = CloneModule(TheModule);
       // Prepare to apply pass for instrumentation
       legacy::FunctionPassManager InstrumentationFPM(InstrumentationMod.get());
+      CreateFPMAnalysisInfo(InstrumentationFPM);
       PassVec.clear();
       PassVec.push_back(j);
       // Apply passes
@@ -1141,6 +1305,7 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     for (Function &F : *TheModule) {
       if (!F.isDeclaration() && isWorthToPredict(F, WorthlessFunctionMap)) {
         legacy::FunctionPassManager PredictFPM(TheModule);
+        CreateFPMAnalysisInfo(PredictFPM);
         InsertPredictedPasses(PredictFPM, F,
             WorkerDestMap[WorkerID].first,
             std::stoul(WorkerDestMap[WorkerID].second, nullptr, 10),
@@ -1153,6 +1318,7 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
   }
   // for those which only need to apply default 4 passes.
   legacy::FunctionPassManager DefaultFPM(TheModule);
+  CreateFPMAnalysisInfo(DefaultFPM);
   InsertDefaultPasses(DefaultFPM);
   DefaultFPM.doInitialization();
   for (Function &F : *TheModule) {
